@@ -3,7 +3,7 @@
 """
 Loter单倍型片段分析工具 - 优化版本
 将Loter SNP索引映射回VCF物理位置，提取祖源片段信息
-作者: 基诺族祖源推断项目
+作者: litianxing
 """
 
 import numpy as np
@@ -545,3 +545,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
