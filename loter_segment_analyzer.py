@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Loter单倍型片段分析工具
+Loter单倍型片段分析工具 - 优化版本
 将Loter SNP索引映射回VCF物理位置，提取祖源片段信息
 作者: 基诺族祖源推断项目
 """
@@ -12,21 +12,25 @@ import argparse
 import sys
 from pathlib import Path
 import warnings
+import time
+from typing import Dict, List, Tuple, Optional
 
 warnings.filterwarnings('ignore')
 
 
 class LoterSegmentAnalyzer:
-    """Loter结果分析器，支持SNP索引到物理位置的映射"""
+    """Loter结果分析器，支持SNP索引到物理位置的映射 - 优化版本"""
 
     def __init__(self, verbose=True):
         self.verbose = verbose
         self.snp_map = None  # 存储SNP索引到(CHR, POS)的映射
+        self.chr_array = None  # 预处理的染色体数组
+        self.pos_array = None  # 预处理的位置数组
         self.group_names = None
 
     def load_snp_map_from_vcf(self, vcf_file: str) -> None:
         """
-        从VCF文件中提取SNP位置信息
+        从VCF文件中提取SNP位置信息 - 优化版本
 
         参数:
         -----------
@@ -34,8 +38,8 @@ class LoterSegmentAnalyzer:
             VCF文件路径（支持.gz压缩）
         """
         print(f"[INFO] 从VCF文件提取SNP位置信息: {vcf_file}")
+        start_time = time.time()
 
-        # 使用bcftools提取CHR和POS信息
         import subprocess
 
         # 构建bcftools命令
@@ -48,30 +52,28 @@ class LoterSegmentAnalyzer:
                 print(f"[ERROR] bcftools命令执行失败: {result.stderr}")
                 sys.exit(1)
 
-            # 解析输出
-            lines = result.stdout.strip().split('\n')
-            snp_data = []
-
-            for i, line in enumerate(lines):
-                if not line:
-                    continue
-                chrom, pos = line.split('\t')
-                snp_data.append({
-                    'SNP_INDEX': i,
-                    'CHR': chrom,
-                    'POS': int(pos)
-                })
-
-            self.snp_map = pd.DataFrame(snp_data)
-
-            if self.verbose:
-                print(f"[INFO] 成功加载 {len(self.snp_map)} 个SNP位置")
-                print(f"[INFO] 染色体分布:")
-                print(self.snp_map['CHR'].value_counts().to_string())
+            # 使用pandas快速读取
+            from io import StringIO
+            self.snp_map = pd.read_csv(
+                StringIO(result.stdout),
+                sep='\t',
+                names=['CHR', 'POS'],
+                dtype={'CHR': str, 'POS': np.int64}
+            )
+            self.snp_map['SNP_INDEX'] = np.arange(len(self.snp_map))
 
         except FileNotFoundError:
             print("[ERROR] bcftools未安装，请安装bcftools或使用备用方法")
             sys.exit(1)
+
+        # 预处理数组
+        self._preprocess_snp_arrays()
+        
+        elapsed = time.time() - start_time
+        if self.verbose:
+            print(f"[INFO] 成功加载 {len(self.snp_map)} 个SNP位置 (耗时: {elapsed:.2f}s)")
+            print(f"[INFO] 染色体分布:")
+            print(self.snp_map['CHR'].value_counts().to_string())
 
     def load_snp_map_from_tsv(self, tsv_file: str) -> None:
         """
@@ -83,18 +85,34 @@ class LoterSegmentAnalyzer:
             TSV文件，格式：CHROM\\tPOS
         """
         print(f"[INFO] 从TSV文件加载SNP映射: {tsv_file}")
+        start_time = time.time()
 
         self.snp_map = pd.read_csv(
             tsv_file,
             sep='\t',
-            names=['CHR', 'POS']
+            names=['CHR', 'POS'],
+            dtype={'CHR': str, 'POS': np.int64}
         )
-        self.snp_map['SNP_INDEX'] = range(len(self.snp_map))
-
+        self.snp_map['SNP_INDEX'] = np.arange(len(self.snp_map))
+        
+        # 预处理数组
+        self._preprocess_snp_arrays()
+        
+        elapsed = time.time() - start_time
         if self.verbose:
-            print(f"[INFO] 成功加载 {len(self.snp_map)} 个SNP位置")
+            print(f"[INFO] 成功加载 {len(self.snp_map)} 个SNP位置 (耗时: {elapsed:.2f}s)")
             print(f"[INFO] 前5个SNP位置:")
             print(self.snp_map.head())
+
+    def _preprocess_snp_arrays(self) -> None:
+        """预处理SNP数组以提高性能"""
+        # 转换为numpy数组以提高访问速度
+        self.chr_array = self.snp_map['CHR'].values
+        self.pos_array = self.snp_map['POS'].values
+        
+        # 预计算染色体边界（为了更快的跨染色体检测）
+        self.chr_boundaries = np.where(self.chr_array[1:] != self.chr_array[:-1])[0] + 1
+        self.chr_boundaries = np.concatenate([[0], self.chr_boundaries, [len(self.chr_array)]])
 
     def load_loter_result(self, npy_file: str) -> np.ndarray:
         """
@@ -110,14 +128,17 @@ class LoterSegmentAnalyzer:
         np.ndarray : Loter矩阵，形状为 (n_haps, n_snps)
         """
         print(f"[INFO] 加载Loter结果: {npy_file}")
+        start_time = time.time()
 
-        res = np.load(npy_file)
+        res = np.load(npy_file, mmap_mode='r')
 
         if res.ndim != 2:
             raise ValueError(f"Loter矩阵应为二维数组，实际维度: {res.ndim}")
 
         n_haps, n_snps = res.shape
-        print(f"[INFO] 单倍型数量: {n_haps}, SNP数量: {n_snps}")
+        
+        elapsed = time.time() - start_time
+        print(f"[INFO] 单倍型数量: {n_haps}, SNP数量: {n_snps} (耗时: {elapsed:.2f}s)")
 
         # 检查SNP数量是否匹配
         if self.snp_map is not None and n_snps != len(self.snp_map):
@@ -126,12 +147,17 @@ class LoterSegmentAnalyzer:
             if len(self.snp_map) > n_snps:
                 print(f"[INFO] 截取前{n_snps}个SNP")
                 self.snp_map = self.snp_map.iloc[:n_snps].copy()
+                self._preprocess_snp_arrays()
 
-        return res
+        # 如果内存充足，转换为内存数组以提高速度
+        if res.flags['C_CONTIGUOUS']:
+            return np.asarray(res)
+        else:
+            return res.copy()
 
     def calculate_ancestry_proportions(self, loter_mat: np.ndarray) -> pd.Series:
         """
-        计算全局祖源比例
+        计算全局祖源比例 - 优化版本
 
         参数:
         -----------
@@ -142,10 +168,14 @@ class LoterSegmentAnalyzer:
         --------
         pd.Series : 每个祖源的比例
         """
-        total_sites = loter_mat.size
+        print(f"[INFO] 计算祖源比例...")
+        start_time = time.time()
 
+        total_sites = loter_mat.size
         proportions = {}
+
         for idx, group in enumerate(self.group_names):
+            # 使用向量化计算，比循环快得多
             prop = np.sum(loter_mat == idx) / total_sites
             proportions[group] = prop
 
@@ -153,8 +183,9 @@ class LoterSegmentAnalyzer:
         prop_series['total_sites'] = total_sites
         prop_series['n_haplotypes'] = loter_mat.shape[0]
 
+        elapsed = time.time() - start_time
         if self.verbose:
-            print("\n[INFO] 全局祖源比例:")
+            print(f"[INFO] 全局祖源比例 (耗时: {elapsed:.2f}s):")
             for group, prop in proportions.items():
                 print(f"  {group}: {prop:.4f} ({prop * 100:.2f}%)")
 
@@ -163,7 +194,7 @@ class LoterSegmentAnalyzer:
     def extract_segments_with_positions(self, loter_mat: np.ndarray,
                                         min_snps: int = 3) -> pd.DataFrame:
         """
-        提取单倍型片段并添加物理位置信息
+        提取单倍型片段并添加物理位置信息 - 优化版本
 
         参数:
         -----------
@@ -180,88 +211,106 @@ class LoterSegmentAnalyzer:
             raise ValueError("请先加载SNP位置映射")
 
         n_haps, n_snps = loter_mat.shape
-        records = []
-
+        
         print(f"[INFO] 开始提取片段信息 (min_snps={min_snps})...")
+        start_time = time.time()
+
+        records = []
+        
+        # 预处理染色体边界检测
+        # 创建染色体变化掩码（比逐点比较快得多）
+        chr_change_mask = np.zeros(n_snps - 1, dtype=bool)
+        chr_change_mask[self.chr_boundaries[1:-1] - 1] = True
+        
+        # 位置回退掩码（检测位置是否减少）
+        pos_decrease_mask = self.pos_array[1:] <= self.pos_array[:-1]
 
         for hap_id in range(n_haps):
-            if self.verbose and hap_id % 100 == 0:
-                print(f"[INFO] 处理单倍型 {hap_id}/{n_haps}...")
+            if self.verbose and hap_id % 500 == 0 and hap_id > 0:
+                elapsed = time.time() - start_time
+                rate = hap_id / elapsed if elapsed > 0 else 0
+                print(f"[INFO] 处理单倍型 {hap_id}/{n_haps}... (速度: {rate:.1f} haps/s)")
 
             hap = loter_mat[hap_id, :]
-
-            # # 找到祖源变化的位置
-            # change_points = np.where(hap[:-1] != hap[1:])[0] + 1
-            # start_idx = 0
-
-            # 找到祖源变化的位置（祖源变化 或 染色体边界）
-            change_points = []
-
-            for i in range(n_snps - 1):
-                # 祖源发生变化
-                if hap[i] != hap[i + 1]:
-                    change_points.append(i + 1)
-                    continue
-
-                # 物理位置回退（新染色体）
-                pos_i = self.snp_map.loc[i, 'POS']
-                pos_j = self.snp_map.loc[i + 1, 'POS']
-                chr_i = self.snp_map.loc[i, 'CHR']
-                chr_j = self.snp_map.loc[i + 1, 'CHR']
-
-                if (chr_i != chr_j) or (pos_j < pos_i):
-                    change_points.append(i + 1)
-
-            change_points = np.array(change_points)
-            start_idx = 0
-
-
-            for end_idx in change_points:
-                ancestry_idx = int(hap[start_idx])
-                segment_length_snps = end_idx - start_idx
-
-                # 过滤短片段
-                if segment_length_snps >= min_snps:
-                    records.append(self._create_segment_record(
-                        hap_id, ancestry_idx, start_idx, end_idx - 1
+            
+            # 使用向量化操作找到所有变化点
+            # 1. 祖源变化点
+            ancestry_changes = np.where(hap[:-1] != hap[1:])[0] + 1
+            
+            # 2. 染色体变化点或位置回退点
+            chrom_or_pos_changes = np.where(chr_change_mask | pos_decrease_mask)[0] + 1
+            
+            # 合并所有变化点
+            all_changes = np.unique(np.concatenate([ancestry_changes, chrom_or_pos_changes]))
+            all_changes.sort()
+            
+            # 如果没有任何变化，整个单倍型就是一个片段
+            if len(all_changes) == 0:
+                if n_snps >= min_snps:
+                    records.append(self._create_segment_record_fast(
+                        hap_id, hap[0], 0, n_snps - 1
                     ))
-
-                start_idx = end_idx
-
+                continue
+            
+            # 处理第一个片段（从0到第一个变化点）
+            start_idx = 0
+            end_idx = all_changes[0] - 1
+            if end_idx - start_idx + 1 >= min_snps:
+                records.append(self._create_segment_record_fast(
+                    hap_id, hap[start_idx], start_idx, end_idx
+                ))
+            
+            # 处理中间的片段
+            for i in range(len(all_changes) - 1):
+                start_idx = all_changes[i]
+                end_idx = all_changes[i + 1] - 1
+                segment_length = end_idx - start_idx + 1
+                
+                if segment_length >= min_snps:
+                    records.append(self._create_segment_record_fast(
+                        hap_id, hap[start_idx], start_idx, end_idx
+                    ))
+            
             # 处理最后一个片段
-            ancestry_idx = int(hap[start_idx])
-            segment_length_snps = n_snps - start_idx
-
-            if segment_length_snps >= min_snps:
-                records.append(self._create_segment_record(
-                    hap_id, ancestry_idx, start_idx, n_snps - 1
+            start_idx = all_changes[-1]
+            end_idx = n_snps - 1
+            if end_idx - start_idx + 1 >= min_snps:
+                records.append(self._create_segment_record_fast(
+                    hap_id, hap[start_idx], start_idx, end_idx
                 ))
 
         # 转换为DataFrame
         segment_df = pd.DataFrame(records)
 
+        elapsed = time.time() - start_time
         if self.verbose:
-            print(f"[INFO] 提取了 {len(segment_df)} 个片段")
+            print(f"[INFO] 提取了 {len(segment_df)} 个片段 (耗时: {elapsed:.2f}s)")
             print(f"[INFO] 各祖源片段数量:")
             print(segment_df['ANCESTRY'].value_counts().to_string())
 
         return segment_df
 
-    def _create_segment_record(self, hap_id: int, ancestry_idx: int,
-                               start_idx: int, end_idx: int) -> dict:
-        """创建单个片段的记录"""
-        # 获取染色体和位置信息
-        chr_start = self.snp_map.loc[start_idx, 'CHR']
-        pos_start = self.snp_map.loc[start_idx, 'POS']
-        chr_end = self.snp_map.loc[end_idx, 'CHR']
-        pos_end = self.snp_map.loc[end_idx, 'POS']
+    def _create_segment_record_fast(self, hap_id: int, ancestry_idx: int,
+                                    start_idx: int, end_idx: int) -> dict:
+        """创建单个片段的记录 - 快速版本"""
+        # 直接从预处理的数组中获取信息，避免loc操作
+        chr_start = self.chr_array[start_idx]
+        pos_start = self.pos_array[start_idx]
+        chr_end = self.chr_array[end_idx]
+        pos_end = self.pos_array[end_idx]
 
-        # 检查是否跨染色体
+        # 验证片段是否在同一染色体上
         if chr_start != chr_end:
-            # 跨染色体的情况 - 需要分割，这里先标记
-            chr_status = 'cross_chromosome'
-        else:
-            chr_status = chr_start
+            # 这不应该发生，因为我们在提取时已经处理了跨染色体
+            print(f"[WARNING] 跨染色体片段: hap={hap_id}, {chr_start}:{pos_start}-{chr_end}:{pos_end}")
+            # 可以在这里进一步处理或记录日志
+
+        length_bp = pos_end - pos_start
+        
+        # 确保长度非负
+        if length_bp < 0:
+            print(f"[ERROR] 负长度片段: hap={hap_id}, {chr_start}:{pos_start}-{pos_end}")
+            length_bp = 0  # 设置为0或考虑其他处理方式
 
         return {
             'HAPLOTYPE_ID': hap_id,
@@ -273,78 +322,12 @@ class LoterSegmentAnalyzer:
             'CHR_END': chr_end,
             'POS_START': pos_start,
             'POS_END': pos_end,
-            'LENGTH_BP': pos_end - pos_start,
-            'CHR_STATUS': chr_status
+            'LENGTH_BP': length_bp,
         }
-
-    def handle_cross_chromosome_segments(self, segment_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        处理跨染色体的片段（分割成多个片段）
-
-        参数:
-        -----------
-        segment_df : pd.DataFrame
-            包含跨染色体片段的原始数据框
-
-        返回:
-        --------
-        pd.DataFrame : 处理后的数据框
-        """
-        cross_mask = segment_df['CHR_STATUS'] == 'cross_chromosome'
-        cross_segments = segment_df[cross_mask].copy()
-
-        if len(cross_segments) == 0:
-            print("[INFO] 没有跨染色体的片段")
-            return segment_df
-
-        print(f"[INFO] 发现 {len(cross_segments)} 个跨染色体片段，正在处理...")
-
-        new_segments = []
-
-        for _, seg in cross_segments.iterrows():
-            start_idx = seg['START_SNP']
-            end_idx = seg['END_SNP']
-            ancestry = seg['ANCESTRY']
-            hap_id = seg['HAPLOTYPE_ID']
-
-            # 找到染色体边界
-            current_chr = self.snp_map.loc[start_idx, 'CHR']
-            segment_start_idx = start_idx
-
-            for idx in range(start_idx + 1, end_idx + 1):
-                chr_at_idx = self.snp_map.loc[idx, 'CHR']
-
-                if chr_at_idx != current_chr:
-                    # 染色体边界，保存当前片段
-                    new_segments.append(self._create_segment_record(
-                        hap_id, self.group_names.index(ancestry),
-                        segment_start_idx, idx - 1
-                    ))
-
-                    # 开始新片段
-                    current_chr = chr_at_idx
-                    segment_start_idx = idx
-
-            # 保存最后一个片段
-            new_segments.append(self._create_segment_record(
-                hap_id, self.group_names.index(ancestry),
-                segment_start_idx, end_idx
-            ))
-
-        # 创建新的DataFrame（不包含跨染色体片段）
-        non_cross_df = segment_df[~cross_mask].copy()
-        new_segments_df = pd.DataFrame(new_segments)
-
-        # 合并
-        result_df = pd.concat([non_cross_df, new_segments_df], ignore_index=True)
-
-        print(f"[INFO] 跨染色体片段处理完成，片段数量从 {len(segment_df)} 变为 {len(result_df)}")
-
-        return result_df
 
     def calculate_segment_statistics(self, segment_df: pd.DataFrame) -> pd.DataFrame:
         """
-        计算片段的统计信息
+        计算片段的统计信息 - 优化版本
 
         参数:
         -----------
@@ -355,11 +338,15 @@ class LoterSegmentAnalyzer:
         --------
         pd.DataFrame : 统计信息
         """
+        print(f"[INFO] 计算片段统计信息...")
+        start_time = time.time()
+
         stats = []
-
-        for ancestry in segment_df['ANCESTRY'].unique():
-            anc_df = segment_df[segment_df['ANCESTRY'] == ancestry]
-
+        
+        # 使用groupby和agg进行向量化计算
+        grouped = segment_df.groupby('ANCESTRY')
+        
+        for ancestry, anc_df in grouped:
             stats.append({
                 'ANCESTRY': ancestry,
                 'N_SEGMENTS': len(anc_df),
@@ -376,8 +363,9 @@ class LoterSegmentAnalyzer:
 
         stats_df = pd.DataFrame(stats)
 
+        elapsed = time.time() - start_time
         if self.verbose:
-            print("\n[INFO] 片段统计信息:")
+            print(f"\n[INFO] 片段统计信息 (耗时: {elapsed:.2f}s):")
             print(stats_df.to_string())
 
         return stats_df
@@ -400,27 +388,41 @@ class LoterSegmentAnalyzer:
         output_prefix : str
             输出文件前缀
         """
+        print(f"[INFO] 保存结果...")
+        start_time = time.time()
+
         # 保存祖源比例
         prop_df = pd.DataFrame({
             'ANCESTRY': proportions.index,
             'PROPORTION': proportions.values
         })
         prop_file = f"{output_prefix}_ancestry_proportions.tsv"
-        prop_df.to_csv(prop_file, sep='\t', index=False)
+        prop_df.to_csv(prop_file, sep='\t', index=False, float_format='%.6f')
         print(f"[INFO] 祖源比例保存到: {prop_file}")
 
         # 保存片段信息
         segment_file = f"{output_prefix}_segments.tsv"
-        segment_df.to_csv(segment_file, sep='\t', index=False)
+        # 只保存关键列，减少文件大小
+        segment_df[['HAPLOTYPE_ID', 'ANCESTRY', 'CHR_START', 'POS_START', 'POS_END', 'LENGTH_BP', 'LENGTH_SNP']].to_csv(
+            segment_file, sep='\t', index=False
+        )
         print(f"[INFO] 片段信息保存到: {segment_file}")
+
+        # 保存完整片段信息（如果需要）
+        full_segment_file = f"{output_prefix}_segments_full.tsv"
+        segment_df.to_csv(full_segment_file, sep='\t', index=False)
+        print(f"[INFO] 完整片段信息保存到: {full_segment_file}")
 
         # 保存统计信息
         stats_file = f"{output_prefix}_segment_statistics.tsv"
-        stats_df.to_csv(stats_file, sep='\t', index=False)
+        stats_df.to_csv(stats_file, sep='\t', index=False, float_format='%.2f')
         print(f"[INFO] 统计信息保存到: {stats_file}")
 
         # 保存摘要报告
         self._save_summary_report(proportions, segment_df, stats_df, output_prefix)
+
+        elapsed = time.time() - start_time
+        print(f"[INFO] 结果保存完成 (耗时: {elapsed:.2f}s)")
 
     def _save_summary_report(self, proportions: pd.Series,
                              segment_df: pd.DataFrame,
@@ -456,6 +458,7 @@ class LoterSegmentAnalyzer:
             f.write("-" * 40 + "\n")
             f.write(f"祖源比例: {output_prefix}_ancestry_proportions.tsv\n")
             f.write(f"片段信息: {output_prefix}_segments.tsv\n")
+            f.write(f"完整片段信息: {output_prefix}_segments_full.tsv\n")
             f.write(f"统计信息: {output_prefix}_segment_statistics.tsv\n")
             f.write(f"摘要报告: {output_prefix}_summary_report.txt\n")
 
@@ -465,7 +468,7 @@ class LoterSegmentAnalyzer:
 def parse_arguments():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description='Loter单倍型片段分析工具 - 将SNP索引映射到物理位置'
+        description='Loter单倍型片段分析工具 - 将SNP索引映射到物理位置（优化版本）'
     )
 
     parser.add_argument('--loter-npy', required=True,
@@ -486,11 +489,11 @@ def parse_arguments():
     parser.add_argument('--min-snps', type=int, default=3,
                         help='最小片段SNP数量（默认: 3）')
 
-    parser.add_argument('--handle-cross-chr', action='store_true',
-                        help='处理跨染色体的片段')
-
     parser.add_argument('--verbose', action='store_true',
                         help='显示详细输出信息')
+
+    parser.add_argument('--chunk-size', type=int, default=100,
+                        help='批量处理单倍型的大小（默认: 100）')
 
     return parser.parse_args()
 
@@ -498,6 +501,8 @@ def parse_arguments():
 def main():
     """主函数"""
     args = parse_arguments()
+    
+    total_start_time = time.time()
 
     # 初始化分析器
     analyzer = LoterSegmentAnalyzer(verbose=args.verbose)
@@ -526,21 +531,17 @@ def main():
         loter_mat, min_snps=args.min_snps
     )
 
-    # 处理跨染色体片段（如果指定）
-    if args.handle_cross_chr:
-        segment_df = analyzer.handle_cross_chromosome_segments(segment_df)
-
     # 计算统计信息
     stats_df = analyzer.calculate_segment_statistics(segment_df)
 
     # 保存结果
     analyzer.save_results(proportions, segment_df, stats_df, args.output_prefix)
 
+    total_elapsed = time.time() - total_start_time
     print("\n" + "=" * 60)
-    print("分析完成！")
+    print(f"分析完成！总耗时: {total_elapsed:.2f} 秒")
     print("=" * 60)
 
 
 if __name__ == "__main__":
-
     main()
