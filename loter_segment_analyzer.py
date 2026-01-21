@@ -190,9 +190,31 @@ class LoterSegmentAnalyzer:
 
             hap = loter_mat[hap_id, :]
 
-            # 找到祖源变化的位置
-            change_points = np.where(hap[:-1] != hap[1:])[0] + 1
+            # # 找到祖源变化的位置
+            # change_points = np.where(hap[:-1] != hap[1:])[0] + 1
+            # start_idx = 0
+
+            # 找到祖源变化的位置（祖源变化 或 染色体边界）
+            change_points = []
+
+            for i in range(n_snps - 1):
+                # 祖源发生变化
+                if hap[i] != hap[i + 1]:
+                    change_points.append(i + 1)
+                    continue
+
+                # 物理位置回退（新染色体）
+                pos_i = self.snp_map.loc[i, 'POS']
+                pos_j = self.snp_map.loc[i + 1, 'POS']
+                chr_i = self.snp_map.loc[i, 'CHR']
+                chr_j = self.snp_map.loc[i + 1, 'CHR']
+
+                if (chr_i != chr_j) or (pos_j < pos_i):
+                    change_points.append(i + 1)
+
+            change_points = np.array(change_points)
             start_idx = 0
+
 
             for end_idx in change_points:
                 ancestry_idx = int(hap[start_idx])
@@ -520,4 +542,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
