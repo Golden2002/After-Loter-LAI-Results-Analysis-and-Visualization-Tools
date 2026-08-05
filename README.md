@@ -277,7 +277,7 @@ loter_analysis_project/
 ```bash
 # Extract SNP positions from the reference VCF
 bcftools query -f '%CHROM\t%POS\n' \
-  /home/litianxing/100My_Jino/110.Relate/data/chrvcf/9pops.subset.vcf.gz \
+  /path/to/data/chrvcf/9pops.subset.vcf.gz \
   > snp_positions.tsv
 
 # Verify the extraction
